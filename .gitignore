@@ -1,0 +1,10 @@
+node_modules/
+dist/
+release/
+resources/task-walker-*.png
+resources/task-walker.png
+resources/task-walker.ico
+*.log
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
