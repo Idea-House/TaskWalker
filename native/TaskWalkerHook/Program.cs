@@ -48,6 +48,7 @@ internal static class Program
     private static bool controlDown;
     private static bool shiftDown;
     private static bool windowsDown;
+    private static bool copyShortcutDown;
     private static long lastAltTapTicks;
 
     [STAThread]
@@ -66,6 +67,7 @@ internal static class Program
             bool secondTap = IsDoubleTap(baseline + Stopwatch.Frequency / 4);
             EmitLine(!firstTap && secondTap ? "LOGIC_OK" : "LOGIC_ERROR");
             EmitTitle("Task Walker Native Hook");
+            EmitCopyTitle("Task Walker Native Hook");
             InputLoop();
             return 0;
         }
@@ -375,11 +377,26 @@ internal static class Program
                 bool up = kind == WM_KEYUP || kind == WM_SYSKEYUP;
                 int key = unchecked((int)input.vkCode);
                 bool isAlt = key == 0x12 || key == 0xA4 || key == 0xA5;
+                bool isCopyKey = key == 0x43;
                 UpdateModifierState(key, down, up);
                 if (down)
                 {
                     if (isAlt && !altDown) { altDown = true; modifiedDuringAlt = controlDown || shiftDown || windowsDown; }
-                    else if (altDown && !isAlt) modifiedDuringAlt = true;
+                    else if (altDown && !isAlt)
+                    {
+                        modifiedDuringAlt = true;
+                        if (isCopyKey && !controlDown && !shiftDown && !windowsDown)
+                        {
+                            if (!copyShortcutDown) EmitCopyTitle(ReadTitle(GetForegroundWindow()));
+                            copyShortcutDown = true;
+                            return new IntPtr(1);
+                        }
+                    }
+                }
+                else if (up && isCopyKey && copyShortcutDown)
+                {
+                    copyShortcutDown = false;
+                    return new IntPtr(1);
                 }
                 else if (up && isAlt && altDown)
                 {
@@ -417,6 +434,7 @@ internal static class Program
     }
 
     private static void EmitTitle(string title) { EmitLine("TITLE_BASE64:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(title ?? ""))); }
+    private static void EmitCopyTitle(string title) { EmitLine("COPY_TITLE_BASE64:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(title ?? ""))); }
     private static void EmitResponse(NativeResponse response) { EmitLine("RESPONSE_BASE64:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(Json.Serialize(response)))); }
     private static void EmitLine(string line) { lock (OutputLock) { Console.WriteLine(line); Console.Out.Flush(); } }
     private static NativeResponse Success(string id) { return new NativeResponse { type = "response", id = id, ok = true }; }

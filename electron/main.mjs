@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, globalShortcut, ipcMain, nativeImage, nativeTheme, screen } from 'electron';
+import { app, BrowserWindow, Menu, Tray, clipboard, globalShortcut, ipcMain, nativeImage, nativeTheme, screen } from 'electron';
 import { promises as fs } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -36,7 +36,9 @@ let hookReady = false;
 let hookRestartFailed = false;
 let hookLogicPassed = false;
 let hookTitleReceived = false;
-let pendingTooltipTitle = '';
+let hookCopyTitleReceived = false;
+let pendingTooltip;
+let tooltipRequestSequence = 0;
 let tooltipTimer;
 let tooltipShown = false;
 let nativeRequestSequence = 0;
@@ -159,9 +161,24 @@ function positionTooltip(width, height) {
 }
 
 function showActiveTitleTooltip(title) {
+  showTooltip(title?.trim() || '（タイトルなし）', 'title');
+}
+
+function showTooltip(text, kind = 'title') {
   if (!tooltipWindow || tooltipWindow.isDestroyed()) return;
-  pendingTooltipTitle = title?.trim() || '（タイトルなし）';
-  tooltipWindow.webContents.send('tooltip:show', pendingTooltipTitle);
+  pendingTooltip = { id: ++tooltipRequestSequence, text, kind };
+  tooltipWindow.webContents.send('tooltip:show', pendingTooltip);
+}
+
+function copyActiveTitle(title) {
+  const normalized = title?.trim() || '';
+  hookCopyTitleReceived = true;
+  if (!normalized) {
+    showTooltip('ウィンドウ名をコピーできませんでした', 'error');
+    return;
+  }
+  clipboard.writeText(normalized);
+  showTooltip(`コピーしました\n${normalized}`, 'copy');
 }
 
 function createTooltipWindow() {
@@ -191,7 +208,7 @@ function createTooltipWindow() {
     tooltipWindow.loadFile(path.join(rootDir, 'dist', 'tooltip.html'));
   }
   tooltipWindow.webContents.on('did-finish-load', () => {
-    if (pendingTooltipTitle) tooltipWindow.webContents.send('tooltip:show', pendingTooltipTitle);
+    if (pendingTooltip) tooltipWindow.webContents.send('tooltip:show', pendingTooltip);
   });
 }
 
@@ -231,6 +248,15 @@ async function startNativeHook() {
         showActiveTitleTooltip(title);
       } catch (error) {
         console.warn('Native helper title could not be decoded:', error.message);
+      }
+      return;
+    }
+    if (line.startsWith('COPY_TITLE_BASE64:')) {
+      try {
+        const title = Buffer.from(line.slice('COPY_TITLE_BASE64:'.length), 'base64').toString('utf8');
+        copyActiveTitle(title);
+      } catch (error) {
+        console.warn('Native helper copy title could not be decoded:', error.message);
       }
       return;
     }
@@ -466,8 +492,11 @@ ipcMain.handle('windows:list', () => listNativeWindows());
 ipcMain.handle('windows:activate', (_event, hwnd) => nativeRequest('ACTIVATE', String(hwnd)));
 ipcMain.handle('windows:close', (_event, hwnd) => nativeRequest('CLOSE', String(hwnd)));
 ipcMain.on('window:hide', () => mainWindow?.hide());
+ipcMain.on('tooltip:ready', () => {
+  if (pendingTooltip) tooltipWindow?.webContents.send('tooltip:show', pendingTooltip);
+});
 ipcMain.on('tooltip:size', (_event, requested) => {
-  if (!tooltipWindow || !pendingTooltipTitle) return;
+  if (!tooltipWindow || !pendingTooltip || requested?.id !== pendingTooltip.id) return;
   const width = Math.min(560, Math.max(180, Math.round(Number(requested?.width) || 360)));
   const height = Math.min(72, Math.max(40, Math.round(Number(requested?.height) || 44)));
   positionTooltip(width, height);
@@ -476,7 +505,7 @@ ipcMain.on('tooltip:size', (_event, requested) => {
   clearTimeout(tooltipTimer);
   tooltipTimer = setTimeout(() => {
     tooltipWindow?.hide();
-    pendingTooltipTitle = '';
+    pendingTooltip = undefined;
   }, 2_000);
 });
 
@@ -543,6 +572,8 @@ app.whenReady().then(async () => {
       nativeHookReady: hookReady,
       nativeHookLogic: hookLogicPassed,
       nativeTitleReceived: hookTitleReceived,
+      nativeCopyTitleReceived: hookCopyTitleReceived,
+      clipboardCopied: clipboard.readText() === 'Task Walker Native Hook',
       tooltipShown: tooltipWasShown,
       tooltipHiddenAfterTimeout: tooltipWasShown && !tooltipWindow.isVisible(),
       sortDirectionsReloaded: settings.sortDirections.type === 'asc'
