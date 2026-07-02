@@ -37,6 +37,9 @@ let hookRestartFailed = false;
 let hookLogicPassed = false;
 let hookTitleReceived = false;
 let hookCopyTitleReceived = false;
+let hookTitleClipboardPassed = false;
+let hookActiveFileReceived = false;
+let hookFileClipboardPassed = false;
 let pendingTooltip;
 let tooltipRequestSequence = 0;
 let tooltipTimer;
@@ -178,7 +181,28 @@ function copyActiveTitle(title) {
     return;
   }
   clipboard.writeText(normalized);
+  hookTitleClipboardPassed = clipboard.readText() === normalized;
   showTooltip(`コピーしました\n${normalized}`, 'copy');
+}
+
+const activeFileErrors = {
+  'unsupported-app': 'このアプリではアクティブなファイルをコピーできません',
+  'no-active-file': 'アクティブなファイルを取得できませんでした',
+  'unsaved-file': '未保存のファイルはコピーできません',
+  'folder-not-supported': 'フォルダーはコピー対象外です',
+  'file-not-found': '対象ファイルが見つかりません',
+  'access-denied': 'ファイルへアクセスする権限がありません',
+  'clipboard-busy': 'クリップボードが使用中です。もう一度お試しください',
+  'native-error': 'ファイルのコピー中にエラーが発生しました',
+};
+
+function showActiveFileResult(result) {
+  hookActiveFileReceived = true;
+  if (!result?.ok) {
+    showTooltip(activeFileErrors[result?.error] || activeFileErrors['native-error'], 'error');
+    return;
+  }
+  showTooltip(`ファイルをコピーしました\n${result.fileName || ''}`.trim(), 'copy');
 }
 
 function createTooltipWindow() {
@@ -241,6 +265,10 @@ async function startNativeHook() {
       hookLogicPassed = true;
       return;
     }
+    if (line === 'FILE_CLIPBOARD_OK') {
+      hookFileClipboardPassed = true;
+      return;
+    }
     if (line.startsWith('TITLE_BASE64:')) {
       try {
         const title = Buffer.from(line.slice('TITLE_BASE64:'.length), 'base64').toString('utf8');
@@ -257,6 +285,15 @@ async function startNativeHook() {
         copyActiveTitle(title);
       } catch (error) {
         console.warn('Native helper copy title could not be decoded:', error.message);
+      }
+      return;
+    }
+    if (line.startsWith('ACTIVE_FILE_BASE64:')) {
+      try {
+        const result = JSON.parse(Buffer.from(line.slice('ACTIVE_FILE_BASE64:'.length), 'base64').toString('utf8'));
+        showActiveFileResult(result);
+      } catch (error) {
+        console.warn('Native helper active file result could not be decoded:', error.message);
       }
       return;
     }
@@ -573,7 +610,9 @@ app.whenReady().then(async () => {
       nativeHookLogic: hookLogicPassed,
       nativeTitleReceived: hookTitleReceived,
       nativeCopyTitleReceived: hookCopyTitleReceived,
-      clipboardCopied: clipboard.readText() === 'Task Walker Native Hook',
+      nativeActiveFileReceived: hookActiveFileReceived,
+      nativeFileClipboard: hookFileClipboardPassed,
+      clipboardCopied: hookTitleClipboardPassed,
       tooltipShown: tooltipWasShown,
       tooltipHiddenAfterTimeout: tooltipWasShown && !tooltipWindow.isVisible(),
       sortDirectionsReloaded: settings.sortDirections.type === 'asc'

@@ -1,13 +1,16 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
+using System.Windows.Forms;
 
 internal static class Program
 {
@@ -34,6 +37,9 @@ internal static class Program
     private static readonly Dictionary<IntPtr, long> Activity = new Dictionary<IntPtr, long>();
     private static readonly Dictionary<string, string> IconCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private static readonly object IconCacheLock = new object();
+    private static readonly object ActiveFileQueueLock = new object();
+    private static readonly Queue<ActiveFileRequest> ActiveFileQueue = new Queue<ActiveFileRequest>();
+    private static readonly AutoResetEvent ActiveFileQueueSignal = new AutoResetEvent(false);
     private static readonly LowLevelKeyboardProc HookCallback = KeyboardHook;
     private static readonly WinEventDelegate ForegroundCallback = ForegroundChanged;
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
@@ -68,6 +74,10 @@ internal static class Program
             EmitLine(!firstTap && secondTap ? "LOGIC_OK" : "LOGIC_ERROR");
             EmitTitle("Task Walker Native Hook");
             EmitCopyTitle("Task Walker Native Hook");
+            string testFile = Process.GetCurrentProcess().MainModule.FileName;
+            ActiveFileResult fileResult = CopyFileToClipboard(testFile);
+            EmitActiveFileResult(fileResult);
+            EmitLine(VerifyFileClipboard(testFile) ? "FILE_CLIPBOARD_OK" : "FILE_CLIPBOARD_ERROR");
             InputLoop();
             return 0;
         }
@@ -89,6 +99,9 @@ internal static class Program
         RememberForegroundWindow(GetForegroundWindow());
         Thread inputThread = new Thread(InputLoop) { IsBackground = true, Name = "TaskWalkerNativeInput" };
         inputThread.Start();
+        Thread activeFileThread = new Thread(ActiveFileLoop) { IsBackground = true, Name = "TaskWalkerActiveFile" };
+        activeFileThread.SetApartmentState(ApartmentState.STA);
+        activeFileThread.Start();
         EmitLine("READY");
 
         MSG message;
@@ -336,6 +349,244 @@ internal static class Program
         return Success(requestId);
     }
 
+    private static void QueueActiveFileCopy(IntPtr window)
+    {
+        uint rawPid;
+        GetWindowThreadProcessId(window, out rawPid);
+        lock (ActiveFileQueueLock)
+        {
+            ActiveFileQueue.Enqueue(new ActiveFileRequest { window = window, pid = unchecked((int)rawPid) });
+        }
+        ActiveFileQueueSignal.Set();
+    }
+
+    private static void ActiveFileLoop()
+    {
+        while (true)
+        {
+            ActiveFileQueueSignal.WaitOne();
+            ActiveFileRequest request = null;
+            lock (ActiveFileQueueLock)
+            {
+                if (ActiveFileQueue.Count > 0) request = ActiveFileQueue.Dequeue();
+            }
+            if (request == null) continue;
+            ActiveFileResult resolved = ResolveActiveFile(request);
+            EmitActiveFileResult(resolved.ok ? CopyFileToClipboard(resolved.path) : resolved);
+        }
+    }
+
+    private static ActiveFileResult ResolveActiveFile(ActiveFileRequest request)
+    {
+        try
+        {
+            if (request.window == IntPtr.Zero || request.pid <= 0) return ActiveFileFailure("no-active-file");
+            string processName;
+            using (Process process = Process.GetProcessById(request.pid)) processName = process.ProcessName.ToLowerInvariant();
+            if (processName == "explorer") return ResolveExplorerSelection(request.window);
+            if (processName == "devenv") return ResolveVisualStudioDocument(request.pid);
+            if (processName == "winword") return ResolveOfficeDocument(request.window, "Word.Application", "word");
+            if (processName == "excel") return ResolveOfficeDocument(request.window, "Excel.Application", "excel");
+            if (processName == "powerpnt") return ResolveOfficeDocument(request.window, "PowerPoint.Application", "powerpoint");
+            return ActiveFileFailure("unsupported-app");
+        }
+        catch (UnauthorizedAccessException) { return ActiveFileFailure("access-denied"); }
+        catch (COMException error) { return ActiveFileFailure(error.ErrorCode == unchecked((int)0x80070005) ? "access-denied" : "native-error"); }
+        catch { return ActiveFileFailure("native-error"); }
+    }
+
+    private static ActiveFileResult ResolveExplorerSelection(IntPtr windowHandle)
+    {
+        object shellObject = null;
+        object windowsObject = null;
+        try
+        {
+            Type shellType = Type.GetTypeFromProgID("Shell.Application");
+            if (shellType == null) return ActiveFileFailure("native-error");
+            shellObject = Activator.CreateInstance(shellType);
+            windowsObject = ((dynamic)shellObject).Windows();
+            dynamic windows = windowsObject;
+            int count = Convert.ToInt32(windows.Count);
+            for (int index = 0; index < count; index++)
+            {
+                object explorerObject = null;
+                object itemsObject = null;
+                object itemObject = null;
+                try
+                {
+                    explorerObject = windows.Item(index);
+                    dynamic explorer = explorerObject;
+                    if (Convert.ToInt64(explorer.HWND) != windowHandle.ToInt64()) continue;
+                    itemsObject = explorer.Document.SelectedItems();
+                    dynamic items = itemsObject;
+                    if (Convert.ToInt32(items.Count) == 0) return ActiveFileFailure("no-active-file");
+                    itemObject = items.Item(0);
+                    return ValidateFilePath(Convert.ToString(((dynamic)itemObject).Path));
+                }
+                finally
+                {
+                    ReleaseCom(itemObject);
+                    ReleaseCom(itemsObject);
+                    ReleaseCom(explorerObject);
+                }
+            }
+            return ActiveFileFailure("no-active-file");
+        }
+        finally
+        {
+            ReleaseCom(windowsObject);
+            ReleaseCom(shellObject);
+        }
+    }
+
+    private static ActiveFileResult ResolveOfficeDocument(IntPtr window, string progId, string application)
+    {
+        object applicationObject = null;
+        object nativeObject = null;
+        object documentObject = null;
+        try
+        {
+            nativeObject = GetNativeOfficeObject(window);
+            if (nativeObject != null)
+            {
+                dynamic native = nativeObject;
+                try
+                {
+                    if (application == "word") documentObject = native.Document;
+                    else if (application == "excel") documentObject = native.Application.ActiveWorkbook;
+                    else documentObject = native.Presentation;
+                }
+                catch { documentObject = null; }
+            }
+            if (documentObject == null)
+            {
+                applicationObject = Marshal.GetActiveObject(progId);
+                dynamic instance = applicationObject;
+                if (application == "word") documentObject = instance.ActiveDocument;
+                else if (application == "excel") documentObject = instance.ActiveWorkbook;
+                else documentObject = instance.ActivePresentation;
+            }
+            if (documentObject == null) return ActiveFileFailure("no-active-file");
+            dynamic document = documentObject;
+            string directory = Convert.ToString(document.Path);
+            if (String.IsNullOrWhiteSpace(directory)) return ActiveFileFailure("unsaved-file");
+            return ValidateFilePath(Convert.ToString(document.FullName));
+        }
+        finally
+        {
+            ReleaseCom(documentObject);
+            ReleaseCom(nativeObject);
+            ReleaseCom(applicationObject);
+        }
+    }
+
+    private static object GetNativeOfficeObject(IntPtr parent)
+    {
+        object found = TryGetNativeOfficeObject(parent);
+        if (found != null) return found;
+        EnumChildWindows(parent, delegate(IntPtr child, IntPtr state)
+        {
+            found = TryGetNativeOfficeObject(child);
+            return found == null;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    private static object TryGetNativeOfficeObject(IntPtr window)
+    {
+        Guid dispatch = new Guid("00020400-0000-0000-C000-000000000046");
+        object value;
+        return AccessibleObjectFromWindow(window, unchecked((uint)-16), ref dispatch, out value) == 0 ? value : null;
+    }
+
+    private static ActiveFileResult ResolveVisualStudioDocument(int pid)
+    {
+        IRunningObjectTable runningObjects;
+        IBindCtx bindContext;
+        if (GetRunningObjectTable(0, out runningObjects) != 0 || CreateBindCtx(0, out bindContext) != 0)
+            return ActiveFileFailure("native-error");
+        IEnumMoniker enumerator = null;
+        try
+        {
+            runningObjects.EnumRunning(out enumerator);
+            IMoniker[] monikers = new IMoniker[1];
+            while (enumerator.Next(1, monikers, IntPtr.Zero) == 0)
+            {
+                IMoniker moniker = monikers[0];
+                object dteObject = null;
+                object documentObject = null;
+                try
+                {
+                    string displayName;
+                    moniker.GetDisplayName(bindContext, null, out displayName);
+                    if (!displayName.StartsWith("!VisualStudio.DTE", StringComparison.OrdinalIgnoreCase)
+                        || !displayName.EndsWith(":" + pid, StringComparison.OrdinalIgnoreCase)) continue;
+                    runningObjects.GetObject(moniker, out dteObject);
+                    documentObject = ((dynamic)dteObject).ActiveDocument;
+                    if (documentObject == null) return ActiveFileFailure("no-active-file");
+                    return ValidateFilePath(Convert.ToString(((dynamic)documentObject).FullName));
+                }
+                finally
+                {
+                    ReleaseCom(documentObject);
+                    ReleaseCom(dteObject);
+                    ReleaseCom(moniker);
+                }
+            }
+            return ActiveFileFailure("no-active-file");
+        }
+        finally
+        {
+            ReleaseCom(enumerator);
+            ReleaseCom(bindContext);
+            ReleaseCom(runningObjects);
+        }
+    }
+
+    private static ActiveFileResult ValidateFilePath(string candidate)
+    {
+        string path = (candidate ?? "").Trim().Trim('"');
+        if (String.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path)) return ActiveFileFailure("no-active-file");
+        if (Directory.Exists(path)) return ActiveFileFailure("folder-not-supported");
+        if (!File.Exists(path)) return ActiveFileFailure("file-not-found");
+        return new ActiveFileResult { ok = true, path = path, fileName = Path.GetFileName(path) };
+    }
+
+    private static ActiveFileResult CopyFileToClipboard(string path)
+    {
+        ActiveFileResult validated = ValidateFilePath(path);
+        if (!validated.ok) return validated;
+        try
+        {
+            StringCollection files = new StringCollection();
+            files.Add(validated.path);
+            DataObject data = new DataObject();
+            data.SetFileDropList(files);
+            data.SetData("Preferred DropEffect", new MemoryStream(new byte[] { 1, 0, 0, 0 }, false));
+            Clipboard.SetDataObject(data, true, 5, 100);
+            return new ActiveFileResult { ok = true, fileName = validated.fileName };
+        }
+        catch (ExternalException) { return ActiveFileFailure("clipboard-busy"); }
+        catch (UnauthorizedAccessException) { return ActiveFileFailure("access-denied"); }
+        catch { return ActiveFileFailure("native-error"); }
+    }
+
+    private static bool VerifyFileClipboard(string expectedPath)
+    {
+        try
+        {
+            StringCollection files = Clipboard.GetFileDropList();
+            object effect = Clipboard.GetData("Preferred DropEffect");
+            MemoryStream stream = effect as MemoryStream;
+            return files.Count == 1 && String.Equals(files[0], expectedPath, StringComparison.OrdinalIgnoreCase)
+                && stream != null && stream.ReadByte() == 1;
+        }
+        catch { return false; }
+    }
+
+    private static ActiveFileResult ActiveFileFailure(string error) { return new ActiveFileResult { ok = false, error = error }; }
+    private static void ReleaseCom(object value) { if (value != null && Marshal.IsComObject(value)) try { Marshal.ReleaseComObject(value); } catch { } }
+
     private static void SeedActivity()
     {
         int rank = 100000;
@@ -385,9 +636,14 @@ internal static class Program
                     else if (altDown && !isAlt)
                     {
                         modifiedDuringAlt = true;
-                        if (isCopyKey && !controlDown && !shiftDown && !windowsDown)
+                        if (isCopyKey && !controlDown && !windowsDown)
                         {
-                            if (!copyShortcutDown) EmitCopyTitle(ReadTitle(GetForegroundWindow()));
+                            if (!copyShortcutDown)
+                            {
+                                IntPtr foreground = GetForegroundWindow();
+                                if (shiftDown) QueueActiveFileCopy(foreground);
+                                else EmitCopyTitle(ReadTitle(foreground));
+                            }
                             copyShortcutDown = true;
                             return new IntPtr(1);
                         }
@@ -435,6 +691,7 @@ internal static class Program
 
     private static void EmitTitle(string title) { EmitLine("TITLE_BASE64:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(title ?? ""))); }
     private static void EmitCopyTitle(string title) { EmitLine("COPY_TITLE_BASE64:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(title ?? ""))); }
+    private static void EmitActiveFileResult(ActiveFileResult result) { EmitLine("ACTIVE_FILE_BASE64:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(Json.Serialize(result)))); }
     private static void EmitResponse(NativeResponse response) { EmitLine("RESPONSE_BASE64:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(Json.Serialize(response)))); }
     private static void EmitLine(string line) { lock (OutputLock) { Console.WriteLine(line); Console.Out.Flush(); } }
     private static NativeResponse Success(string id) { return new NativeResponse { type = "response", id = id, ok = true }; }
@@ -455,6 +712,18 @@ internal static class Program
         public bool minimized { get; set; }
         public long lastActive { get; set; }
         public bool isActive { get; set; }
+    }
+    private sealed class ActiveFileRequest
+    {
+        public IntPtr window { get; set; }
+        public int pid { get; set; }
+    }
+    private sealed class ActiveFileResult
+    {
+        public bool ok { get; set; }
+        public string path { get; set; }
+        public string fileName { get; set; }
+        public string error { get; set; }
     }
     private sealed class NativeResponse
     {
@@ -501,6 +770,9 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder executablePath, ref uint size);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("oleacc.dll")] private static extern int AccessibleObjectFromWindow(IntPtr window, uint objectId, ref Guid interfaceId, [MarshalAs(UnmanagedType.Interface)] out object value);
+    [DllImport("ole32.dll")] private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable runningObjectTable);
+    [DllImport("ole32.dll")] private static extern int CreateBindCtx(int reserved, out IBindCtx bindContext);
     [DllImport("user32.dll")] private static extern int GetMessage(out MSG message, IntPtr window, uint minimum, uint maximum);
     [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG message);
     [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG message);

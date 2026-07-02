@@ -15,7 +15,7 @@ if (-not $compiler) {
 }
 
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
-& $compiler /nologo /target:exe /platform:x64 /optimize+ /reference:System.Web.Extensions.dll /reference:System.Drawing.dll "/out:$output" $source
+& $compiler /nologo /target:exe /platform:x64 /optimize+ /reference:System.Web.Extensions.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:Microsoft.CSharp.dll "/out:$output" $source
 if ($LASTEXITCODE -ne 0) {
     throw "Native helper compilation failed with exit code $LASTEXITCODE."
 }
