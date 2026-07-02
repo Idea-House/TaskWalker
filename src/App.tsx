@@ -21,14 +21,18 @@ const shortcutLabels: Array<{ key: ShortcutName; label: string; description: str
   { key: 'settings', label: '設定を表示', description: 'この設定画面を開きます' },
 ];
 
-const errorText = (error: NativeWindowError) => ({
+const errorText = (error: NativeWindowError) => {
+  if (error === 'native-restarting') return 'Windows連携機能を再起動しています。しばらくしてから再試行してください。';
+  if (error === 'native-restart-failed') return 'Windows連携機能を再起動できませんでした。Task Walkerを再起動してください。';
+  return ({
   'window-not-found': '対象のウィンドウはすでに閉じられています。',
   'access-denied': 'このウィンドウを操作する権限がありません。',
   'activation-failed': 'ウィンドウを前面に切り替えられませんでした。',
   'native-unavailable': 'Windows連携機能を起動できませんでした。',
   'native-timeout': 'Windowsからの応答がありませんでした。',
   'native-error': 'Windows連携でエラーが発生しました。',
-}[error]);
+  }[error]);
+};
 
 export default function App() {
   const nativeMode = Boolean(window.taskWalker?.listWindows);
@@ -50,24 +54,34 @@ export default function App() {
   });
   const inputRef = useRef<HTMLInputElement>(null);
   const shouldSelectActiveRef = useRef(true);
+  const refreshInFlightRef = useRef(false);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
 
   const visibleTasks = useMemo(() => sortTasks(filterTasks(tasks, query), settings.sortMode, settings.sortDirections[settings.sortMode]), [tasks, query, settings.sortMode, settings.sortDirections]);
   const selectedTask = visibleTasks.find((task) => task.id === selectedId) ?? visibleTasks[0];
 
   const refreshTasks = useCallback(async () => {
-    if (!window.taskWalker?.listWindows) return;
-    const result = await window.taskWalker.listWindows();
-    setLoading(false);
-    if (result.ok) {
-      setTasks(result.windows); setListError(null);
-      if (shouldSelectActiveRef.current) {
-        const active = result.windows.find((task) => task.isActive);
-        if (active) setSelectedId(active.id);
-        shouldSelectActiveRef.current = false;
+    if (!window.taskWalker?.listWindows || refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    try {
+      const result = await window.taskWalker.listWindows();
+      setLoading(false);
+      if (result.ok) {
+        setTasks((current) => result.windows.map((task) => ({
+          ...task,
+          iconDataUrl: task.iconDataUrl ?? current.find((item) => item.hwnd === task.hwnd && item.executablePath === task.executablePath)?.iconDataUrl,
+        })));
+        setListError(null);
+        if (shouldSelectActiveRef.current) {
+          const active = result.windows.find((task) => task.isActive);
+          if (active) setSelectedId(active.id);
+          shouldSelectActiveRef.current = false;
+        }
       }
+      else setListError(errorText(result.error));
+    } finally {
+      refreshInFlightRef.current = false;
     }
-    else setListError(errorText(result.error));
   }, []);
 
   const openView = useCallback((nextView: ViewName) => {
@@ -84,6 +98,13 @@ export default function App() {
     const update = () => setTheme(media.matches ? 'dark' : 'light');
     media.addEventListener('change', update); return () => media.removeEventListener('change', update);
   }, []);
+  useEffect(() => window.taskWalker?.onWindowIcon?.((update) => {
+    setTasks((current) => current.map((task) => (
+      task.hwnd === update.hwnd && task.executablePath === update.executablePath
+        ? { ...task, iconDataUrl: update.iconDataUrl }
+        : task
+    )));
+  }), []);
   useEffect(() => window.taskWalker?.onOpenView((next) => {
     if (next === 'list') shouldSelectActiveRef.current = true;
     openView(next);
@@ -186,7 +207,7 @@ export default function App() {
           <AppIcon task={task} /><span className="task-title">{task.title}</span><span className="process-name">実行中: {task.processName}</span>
           {task.isActive && <span className="active-status">表示中</span>}
           <button type="button" className="row-close" aria-label={`${task.title}を閉じる`} onClick={(event) => { event.stopPropagation(); void closeTask(task); }}><Dismiss16Regular /></button>
-        </div>) : <div className="empty-state"><Search20Regular /><strong>{emptyCopy[0]}</strong>{emptyCopy[1] && <span>{emptyCopy[1]}</span>}</div>}
+        </div>) : <div className="empty-state"><Search20Regular /><strong>{emptyCopy[0]}</strong>{emptyCopy[1] && <span>{emptyCopy[1]}</span>}{listError && <button className="secondary-button" onClick={() => { setLoading(true); void refreshTasks(); }}>再試行</button>}</div>}
       </section>
       <footer className="command-footer"><span className="brand-name">Task Walker</span><div className="command-list">
         <button onClick={() => selectedTask && void activateTask(selectedTask)}>切り替え <ShortcutBadge value={settings.shortcuts.activate} /></button>

@@ -4,6 +4,11 @@ contextBridge.exposeInMainWorld('taskWalker', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
   listWindows: () => ipcRenderer.invoke('windows:list'),
+  onWindowIcon: (callback) => {
+    const listener = (_event, update) => callback(update);
+    ipcRenderer.on('windows:icon', listener);
+    return () => ipcRenderer.removeListener('windows:icon', listener);
+  },
   activateWindow: (hwnd) => ipcRenderer.invoke('windows:activate', hwnd),
   closeWindow: (hwnd) => ipcRenderer.invoke('windows:close', hwnd),
   hideOverlay: () => ipcRenderer.send('window:hide'),

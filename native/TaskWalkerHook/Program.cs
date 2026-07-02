@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -31,8 +29,6 @@ internal static class Program
     private static readonly object OutputLock = new object();
     private static readonly object ActivityLock = new object();
     private static readonly Dictionary<IntPtr, long> Activity = new Dictionary<IntPtr, long>();
-    private static readonly Dictionary<string, string> IconCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-    private static readonly object IconCacheLock = new object();
     private static readonly LowLevelKeyboardProc HookCallback = KeyboardHook;
     private static readonly WinEventDelegate ForegroundCallback = ForegroundChanged;
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
@@ -134,7 +130,6 @@ internal static class Program
             new WindowRecord {
                 id = "1001", hwnd = "1001", pid = 1234, title = "Task Walker Native Test",
                 appName = "Native Test", processName = "NativeTest.exe", executablePath = executablePath,
-                iconPngBase64 = ExtractIconBase64(executablePath),
                 minimized = false, lastActive = 1, isActive = true
             }
         };
@@ -197,44 +192,9 @@ internal static class Program
         string handle = window.ToInt64().ToString("X");
         return new WindowRecord {
             id = handle, hwnd = handle, pid = process.Id, title = title, appName = appName,
-            processName = processName, executablePath = executablePath, iconPngBase64 = ExtractIconBase64(executablePath),
+            processName = processName, executablePath = executablePath,
             minimized = IsIconic(window), lastActive = active
         };
-    }
-
-    private static string ExtractIconBase64(string executablePath)
-    {
-        if (String.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath)) return "";
-        lock (IconCacheLock)
-        {
-            string cached;
-            if (IconCache.TryGetValue(executablePath, out cached)) return cached;
-        }
-
-        string encoded = "";
-        try
-        {
-            using (Icon icon = Icon.ExtractAssociatedIcon(executablePath))
-            {
-                if (icon != null)
-                {
-                    using (Bitmap bitmap = icon.ToBitmap())
-                    using (MemoryStream stream = new MemoryStream())
-                    {
-                        bitmap.Save(stream, ImageFormat.Png);
-                        encoded = Convert.ToBase64String(stream.ToArray());
-                    }
-                }
-            }
-        }
-        catch { }
-
-        lock (IconCacheLock)
-        {
-            if (IconCache.Count >= 128) IconCache.Clear();
-            IconCache[executablePath] = encoded;
-        }
-        return encoded;
     }
 
     private static Process ResolveProcess(IntPtr window, int pid)
@@ -396,7 +356,6 @@ internal static class Program
         public string appName { get; set; }
         public string processName { get; set; }
         public string executablePath { get; set; }
-        public string iconPngBase64 { get; set; }
         public bool minimized { get; set; }
         public long lastActive { get; set; }
         public bool isActive { get; set; }

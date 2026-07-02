@@ -32,6 +32,7 @@ let tray;
 let hookProcess;
 let hookRestartCount = 0;
 let hookReady = false;
+let hookRestartFailed = false;
 let hookLogicPassed = false;
 let hookTitleReceived = false;
 let pendingTooltipTitle = '';
@@ -40,6 +41,8 @@ let tooltipShown = false;
 let nativeRequestSequence = 0;
 const nativeRequests = new Map();
 const iconCache = new Map();
+const iconRequests = new Map();
+const NATIVE_REQUEST_TIMEOUT_MS = 8_000;
 let settings = structuredClone(defaults);
 let pendingView = 'list';
 let quitting = false;
@@ -49,6 +52,14 @@ if (!gotLock) app.quit();
 
 function settingsPath() {
   return path.join(app.getPath('userData'), 'settings.json');
+}
+
+function logNative(message) {
+  const line = `[${new Date().toISOString()}] ${message}`;
+  console.warn(line);
+  if (app.isReady()) {
+    void fs.appendFile(path.join(app.getPath('userData'), 'task-walker.log'), `${line}\n`, 'utf8').catch(() => {});
+  }
 }
 
 function normalizeSettings(value) {
@@ -186,21 +197,24 @@ async function startNativeHook() {
   try {
     await fs.access(executable);
   } catch {
-    console.warn(`Native helper was not found: ${executable}`);
+    logNative(`Native helper was not found: ${executable}`);
     return;
   }
 
   const args = smokeMode ? ['--self-test'] : [];
-  hookProcess = spawn(executable, args, {
+  hookReady = false;
+  const child = spawn(executable, args, {
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, TASK_WALKER_HOST_PID: String(process.pid) },
   });
-  const lines = readline.createInterface({ input: hookProcess.stdout });
+  hookProcess = child;
+  const lines = readline.createInterface({ input: child.stdout });
   lines.on('line', (line) => {
     if (line === 'READY') {
       hookReady = true;
       hookRestartCount = 0;
+      hookRestartFailed = false;
       return;
     }
     if (line === 'LOGIC_OK') {
@@ -231,8 +245,12 @@ async function startNativeHook() {
       }
     }
   });
-  hookProcess.stderr.on('data', (chunk) => console.warn(String(chunk).trim()));
-  hookProcess.on('exit', () => {
+  child.on('error', (error) => logNative(`Native helper could not be started: ${error.message}`));
+  child.stderr.on('data', (chunk) => logNative(`Native helper error: ${String(chunk).trim()}`));
+  child.on('exit', (code, signal) => {
+    if (hookProcess !== child) return;
+    logNative(`Native helper exited (code=${code ?? 'none'}, signal=${signal ?? 'none'}).`);
+    hookReady = false;
     for (const pending of nativeRequests.values()) {
       clearTimeout(pending.timer);
       pending.resolve({ ok: false, error: 'native-unavailable' });
@@ -243,18 +261,27 @@ async function startNativeHook() {
     if (!quitting && !smokeMode && hookRestartCount < 3) {
       hookRestartCount += 1;
       setTimeout(startNativeHook, hookRestartCount * 750);
+    } else if (!quitting && !smokeMode) {
+      hookRestartFailed = true;
+      logNative('Native helper restart limit was reached.');
     }
   });
 }
 
 function nativeRequest(command, hwnd = '') {
-  if (!hookProcess?.stdin?.writable || !hookReady) return Promise.resolve({ ok: false, error: 'native-unavailable' });
+  if (!hookProcess?.stdin?.writable || !hookReady) {
+    const error = hookRestartFailed ? 'native-restart-failed' : hookRestartCount > 0 ? 'native-restarting' : 'native-unavailable';
+    return Promise.resolve({ ok: false, error });
+  }
   const id = String(++nativeRequestSequence);
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       nativeRequests.delete(id);
+      logNative(`Native request timed out: ${command} (${NATIVE_REQUEST_TIMEOUT_MS}ms). Restarting helper.`);
       resolve({ ok: false, error: 'native-timeout' });
-    }, 2_000);
+      hookReady = false;
+      hookProcess?.kill();
+    }, NATIVE_REQUEST_TIMEOUT_MS);
     nativeRequests.set(id, { resolve, timer });
     hookProcess.stdin.write(`${command}|${id}${hwnd ? `|${hwnd}` : ''}\n`, 'utf8');
   });
@@ -275,17 +302,35 @@ async function iconForExecutable(executablePath) {
   }
 }
 
+function queueWindowIcons(windows) {
+  for (const window of windows) {
+    if (!window.executablePath) continue;
+    const key = window.executablePath.toLocaleLowerCase();
+    let request = iconRequests.get(key);
+    if (!request) {
+      request = iconForExecutable(window.executablePath).finally(() => iconRequests.delete(key));
+      iconRequests.set(key, request);
+    }
+    void request.then((iconDataUrl) => {
+      if (!iconDataUrl || !mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.send('windows:icon', {
+        hwnd: window.hwnd,
+        executablePath: window.executablePath,
+        iconDataUrl,
+      });
+    }).catch((error) => console.warn(`Window icon could not be loaded: ${window.executablePath}`, error.message));
+  }
+}
+
 async function listNativeWindows() {
   const response = await nativeRequest('LIST');
   if (!response.ok) return response;
-  const windows = await Promise.all((response.windows ?? []).map(async (window) => ({
+  const windows = (response.windows ?? []).map((window) => ({
     ...window,
-    iconDataUrl: window.iconPngBase64
-      ? `data:image/png;base64,${window.iconPngBase64}`
-      : await iconForExecutable(window.executablePath),
+    iconDataUrl: iconCache.get(window.executablePath) || undefined,
     fallbackIcon: fallbackIconForProcess(window.processName),
-  })));
-  for (const window of windows) delete window.iconPngBase64;
+  }));
+  queueWindowIcons(windows.filter((window) => !window.iconDataUrl));
   return { ok: true, windows };
 }
 

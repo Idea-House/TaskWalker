@@ -36,7 +36,8 @@ export type SaveSettingsResult =
   | { ok: true; settings: AppSettings }
   | { ok: false; error: 'duplicate-shortcut' | 'shortcut-in-use' | 'save-failed'; message: string };
 
-export type NativeWindowError = 'window-not-found' | 'access-denied' | 'activation-failed' | 'native-unavailable' | 'native-timeout' | 'native-error';
+export type NativeWindowError = 'window-not-found' | 'access-denied' | 'activation-failed' | 'native-unavailable' | 'native-timeout' | 'native-restarting' | 'native-restart-failed' | 'native-error';
+export type WindowIconUpdate = { hwnd: string; executablePath: string; iconDataUrl: string };
 export type WindowListResult = { ok: true; windows: TaskItem[] } | { ok: false; error: NativeWindowError; message?: string };
 export type WindowActionResult = { ok: true } | { ok: false; error: NativeWindowError; message?: string };
 
@@ -46,6 +47,7 @@ declare global {
       getSettings: () => Promise<AppSettings>;
       saveSettings: (settings: AppSettings) => Promise<SaveSettingsResult>;
       listWindows: () => Promise<WindowListResult>;
+      onWindowIcon?: (callback: (update: WindowIconUpdate) => void) => () => void;
       activateWindow: (hwnd: string) => Promise<WindowActionResult>;
       closeWindow: (hwnd: string) => Promise<WindowActionResult>;
       hideOverlay: () => void;

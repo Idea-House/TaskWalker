@@ -73,6 +73,22 @@ describe('Task Walker UI', () => {
     await waitFor(() => expect(closeWindow).toHaveBeenCalledWith(initialTasks[0].hwnd));
   });
 
+  it('applies icons delivered after the window list without blocking it', async () => {
+    let deliverIcon: ((update: { hwnd: string; executablePath: string; iconDataUrl: string }) => void) | undefined;
+    const task = { ...initialTasks[0], iconDataUrl: undefined };
+    window.taskWalker = {
+      getSettings: vi.fn().mockResolvedValue(defaultSettings), saveSettings: vi.fn().mockResolvedValue({ ok: true, settings: defaultSettings }),
+      listWindows: vi.fn().mockResolvedValue({ ok: true, windows: [task] }), activateWindow: vi.fn(), closeWindow: vi.fn(),
+      hideOverlay: vi.fn(), onOpenView: vi.fn().mockReturnValue(() => {}), onThemeChanged: vi.fn().mockReturnValue(() => {}),
+      onWindowIcon: vi.fn((callback) => { deliverIcon = callback; return () => {}; }),
+    };
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
+    expect(container.querySelector('.native-app-icon')).not.toBeInTheDocument();
+    deliverIcon?.({ hwnd: task.hwnd, executablePath: task.executablePath, iconDataUrl: 'data:image/png;base64,dGVzdA==' });
+    await waitFor(() => expect(container.querySelector('.native-app-icon')).toBeInTheDocument());
+  });
+
   it('opens settings and toggles sort direction', () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'アプリ種別を降順に変更' }));
