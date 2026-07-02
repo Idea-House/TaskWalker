@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -24,11 +26,14 @@ internal static class Program
     private const int SW_RESTORE = 9;
     private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     private const uint WINEVENT_OUTOFCONTEXT = 0;
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const int DoubleTapMilliseconds = 400;
 
     private static readonly object OutputLock = new object();
     private static readonly object ActivityLock = new object();
     private static readonly Dictionary<IntPtr, long> Activity = new Dictionary<IntPtr, long>();
+    private static readonly Dictionary<string, string> IconCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private static readonly object IconCacheLock = new object();
     private static readonly LowLevelKeyboardProc HookCallback = KeyboardHook;
     private static readonly WinEventDelegate ForegroundCallback = ForegroundChanged;
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
@@ -113,6 +118,25 @@ internal static class Program
                     EmitResponse(ActivateWindow(requestId, ParseHandle(parts[2])));
                 else if (command == "CLOSE" && parts.Length >= 3)
                     EmitResponse(CloseWindow(requestId, ParseHandle(parts[2])));
+                else if (command == "ICON" && parts.Length >= 3)
+                {
+                    string encodedPath = parts[2];
+                    ThreadPool.QueueUserWorkItem(delegate
+                    {
+                        try
+                        {
+                            string executablePath = Encoding.UTF8.GetString(Convert.FromBase64String(encodedPath));
+                            EmitResponse(new NativeResponse {
+                                type = "response", id = requestId, ok = true,
+                                iconPngBase64 = ExtractIconBase64(executablePath)
+                            });
+                        }
+                        catch (Exception error)
+                        {
+                            EmitResponse(new NativeResponse { type = "response", id = requestId, ok = false, error = "native-error", message = error.Message });
+                        }
+                    });
+                }
                 else
                     EmitResponse(Failure(requestId, "invalid-request"));
             }
@@ -172,7 +196,7 @@ internal static class Program
 
         Process process = ResolveProcess(window, pid);
         string processName = Safe(delegate { return process.ProcessName + ".exe"; }, "Unknown.exe");
-        string executablePath = Safe(delegate { return process.MainModule.FileName; }, "");
+        string executablePath = ResolveExecutablePath(process, pid);
         string appName = Safe(delegate
         {
             FileVersionInfo info = process.MainModule.FileVersionInfo;
@@ -210,6 +234,60 @@ internal static class Program
             return true;
         }, IntPtr.Zero);
         return childPid > 0 ? Process.GetProcessById(childPid) : process;
+    }
+
+    private static string ResolveExecutablePath(Process process, int pid)
+    {
+        string mainModulePath = Safe(delegate { return process.MainModule.FileName; }, "");
+        if (!String.IsNullOrWhiteSpace(mainModulePath)) return mainModulePath;
+
+        IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, unchecked((uint)pid));
+        if (handle == IntPtr.Zero) return "";
+        try
+        {
+            uint capacity = 32768;
+            StringBuilder path = new StringBuilder(unchecked((int)capacity));
+            return QueryFullProcessImageName(handle, 0, path, ref capacity) ? path.ToString() : "";
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
+    private static string ExtractIconBase64(string executablePath)
+    {
+        if (String.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath)) return "";
+        lock (IconCacheLock)
+        {
+            string cached;
+            if (IconCache.TryGetValue(executablePath, out cached)) return cached;
+        }
+
+        string encoded = "";
+        try
+        {
+            using (Icon icon = Icon.ExtractAssociatedIcon(executablePath))
+            {
+                if (icon != null)
+                {
+                    using (Bitmap bitmap = icon.ToBitmap())
+                    using (MemoryStream stream = new MemoryStream())
+                    {
+                        bitmap.Save(stream, ImageFormat.Png);
+                        encoded = Convert.ToBase64String(stream.ToArray());
+                    }
+                }
+            }
+        }
+        catch { }
+
+        lock (IconCacheLock)
+        {
+            if (IconCache.Count >= 128) IconCache.Clear();
+            IconCache[executablePath] = encoded;
+        }
+        return encoded;
     }
 
     private static NativeResponse ActivateWindow(string requestId, IntPtr window)
@@ -367,6 +445,7 @@ internal static class Program
         public bool ok { get; set; }
         public string error { get; set; }
         public string message { get; set; }
+        public string iconPngBase64 { get; set; }
         public List<WindowRecord> windows { get; set; }
     }
 
@@ -401,6 +480,9 @@ internal static class Program
     [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, WinEventDelegate callback, uint process, uint thread, uint flags);
     [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hook);
     [DllImport("kernel32.dll", CharSet = CharSet.Auto)] private static extern IntPtr GetModuleHandle(string moduleName);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder executablePath, ref uint size);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
     [DllImport("user32.dll")] private static extern int GetMessage(out MSG message, IntPtr window, uint minimum, uint maximum);
     [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG message);
     [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG message);

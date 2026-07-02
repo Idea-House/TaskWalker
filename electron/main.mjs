@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { canRetryIcon, nextIconFailure } from './icon-retry.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -42,6 +43,8 @@ let nativeRequestSequence = 0;
 const nativeRequests = new Map();
 const iconCache = new Map();
 const iconRequests = new Map();
+const iconFailures = new Map();
+const missingIconPaths = new Set();
 const NATIVE_REQUEST_TIMEOUT_MS = 8_000;
 let settings = structuredClone(defaults);
 let pendingView = 'list';
@@ -268,22 +271,26 @@ async function startNativeHook() {
   });
 }
 
-function nativeRequest(command, hwnd = '') {
+function nativeRequest(command, argument = '', options = {}) {
   if (!hookProcess?.stdin?.writable || !hookReady) {
     const error = hookRestartFailed ? 'native-restart-failed' : hookRestartCount > 0 ? 'native-restarting' : 'native-unavailable';
     return Promise.resolve({ ok: false, error });
   }
   const id = String(++nativeRequestSequence);
+  const timeoutMs = options.timeoutMs ?? NATIVE_REQUEST_TIMEOUT_MS;
+  const restartOnTimeout = options.restartOnTimeout ?? true;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       nativeRequests.delete(id);
-      logNative(`Native request timed out: ${command} (${NATIVE_REQUEST_TIMEOUT_MS}ms). Restarting helper.`);
+      logNative(`Native request timed out: ${command} (${timeoutMs}ms).${restartOnTimeout ? ' Restarting helper.' : ''}`);
       resolve({ ok: false, error: 'native-timeout' });
-      hookReady = false;
-      hookProcess?.kill();
-    }, NATIVE_REQUEST_TIMEOUT_MS);
+      if (restartOnTimeout) {
+        hookReady = false;
+        hookProcess?.kill();
+      }
+    }, timeoutMs);
     nativeRequests.set(id, { resolve, timer });
-    hookProcess.stdin.write(`${command}|${id}${hwnd ? `|${hwnd}` : ''}\n`, 'utf8');
+    hookProcess.stdin.write(`${command}|${id}${argument ? `|${argument}` : ''}\n`, 'utf8');
   });
 }
 
@@ -291,28 +298,57 @@ async function iconForExecutable(executablePath) {
   if (!executablePath) return '';
   if (iconCache.has(executablePath)) return iconCache.get(executablePath);
   try {
-    const icon = await app.getFileIcon(executablePath, { size: 'large' });
-    const dataUrl = icon.isEmpty() ? '' : icon.toDataURL();
-    iconCache.set(executablePath, dataUrl);
-    if (iconCache.size > 128) iconCache.delete(iconCache.keys().next().value);
+    const encodedPath = Buffer.from(executablePath, 'utf8').toString('base64');
+    const response = await nativeRequest('ICON', encodedPath, { timeoutMs: 5_000, restartOnTimeout: false });
+    const dataUrl = response.ok && response.iconPngBase64
+      ? `data:image/png;base64,${response.iconPngBase64}`
+      : '';
+    if (dataUrl) {
+      iconCache.set(executablePath, dataUrl);
+      iconFailures.delete(executablePath.toLocaleLowerCase());
+      if (iconCache.size > 128) iconCache.delete(iconCache.keys().next().value);
+    }
     return dataUrl;
-  } catch {
-    iconCache.set(executablePath, '');
+  } catch (error) {
+    logNative(`Window icon request failed: ${executablePath}: ${error.message}`);
     return '';
   }
 }
 
 function queueWindowIcons(windows) {
+  const activePaths = new Set(windows.map((window) => window.executablePath?.toLocaleLowerCase()).filter(Boolean));
+  const activeHandles = new Set(windows.map((window) => window.hwnd));
+  for (const key of iconFailures.keys()) if (!activePaths.has(key)) iconFailures.delete(key);
+  for (const hwnd of missingIconPaths) if (!activeHandles.has(hwnd)) missingIconPaths.delete(hwnd);
+
   for (const window of windows) {
-    if (!window.executablePath) continue;
+    if (!window.executablePath) {
+      if (!missingIconPaths.has(window.hwnd)) {
+        missingIconPaths.add(window.hwnd);
+        logNative(`Window icon path is unavailable: ${window.processName} (pid=${window.pid}, hwnd=${window.hwnd}).`);
+      }
+      continue;
+    }
+    missingIconPaths.delete(window.hwnd);
     const key = window.executablePath.toLocaleLowerCase();
+    const failure = iconFailures.get(key);
+    if (!canRetryIcon(failure)) continue;
     let request = iconRequests.get(key);
     if (!request) {
-      request = iconForExecutable(window.executablePath).finally(() => iconRequests.delete(key));
+      request = iconForExecutable(window.executablePath).then((iconDataUrl) => {
+        if (!iconDataUrl) {
+          const previous = iconFailures.get(key);
+          const next = nextIconFailure(previous);
+          iconFailures.set(key, next);
+          logNative(`Window icon extraction returned no icon: ${window.executablePath}. Retry ${next.attempts} in ${next.delay}ms.`);
+        }
+        return iconDataUrl;
+      }).finally(() => iconRequests.delete(key));
       iconRequests.set(key, request);
     }
     void request.then((iconDataUrl) => {
-      if (!iconDataUrl || !mainWindow || mainWindow.isDestroyed()) return;
+      if (!iconDataUrl) return;
+      if (!mainWindow || mainWindow.isDestroyed()) return;
       mainWindow.webContents.send('windows:icon', {
         hwnd: window.hwnd,
         executablePath: window.executablePath,
@@ -482,6 +518,11 @@ app.whenReady().then(async () => {
     await new Promise((resolve) => setTimeout(resolve, 350));
     const tooltipWasShown = tooltipShown;
     const listResult = await listNativeWindows();
+    const iconResult = await nativeRequest(
+      'ICON',
+      Buffer.from(process.execPath, 'utf8').toString('base64'),
+      { timeoutMs: 5_000, restartOnTimeout: false },
+    );
     const smokeHwnd = listResult.windows?.[0]?.hwnd ?? '1001';
     const activateResult = await nativeRequest('ACTIVATE', smokeHwnd);
     const closeResult = await nativeRequest('CLOSE', smokeHwnd);
@@ -508,6 +549,7 @@ app.whenReady().then(async () => {
         && settings.sortDirections.recent === 'desc'
         && settings.sortDirections.title === 'asc',
       nativeList: listResult.ok && listResult.windows?.length === 1,
+      nativeIcon: iconResult.ok && Boolean(iconResult.iconPngBase64),
       nativeActivate: activateResult.ok,
       nativeClose: closeResult.ok,
     }));
