@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, clipboard, globalShortcut, ipcMain, nativeImage, nativeTheme, screen } from 'electron';
+import { app, BrowserWindow, Menu, Tray, clipboard, ipcMain, nativeImage, nativeTheme, screen } from 'electron';
 import { promises as fs } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -20,7 +20,6 @@ const defaults = Object.freeze({
   sortMode: 'type',
   sortDirections: { type: 'asc', recent: 'desc', title: 'asc' },
   shortcuts: {
-    toggle: 'Alt+W',
     activate: 'Enter',
     close: 'Control+Enter',
     settings: 'Control+,',
@@ -138,10 +137,6 @@ function toggleOverlay() {
   if (!mainWindow) return;
   if (mainWindow.isVisible()) mainWindow.hide();
   else showOverlay('list');
-}
-
-function registerToggle(accelerator) {
-  return globalShortcut.register(accelerator, toggleOverlay);
 }
 
 function iconPath(extension) {
@@ -267,6 +262,12 @@ async function startNativeHook() {
     }
     if (line === 'FILE_CLIPBOARD_OK') {
       hookFileClipboardPassed = true;
+      return;
+    }
+    if (line.startsWith('SWITCH:')) {
+      const action = line.slice('SWITCH:'.length).toLocaleLowerCase().replaceAll('_', '-');
+      if (action.startsWith('begin-')) showOverlay('list');
+      mainWindow?.webContents.send('switch:event', action);
       return;
     }
     if (line.startsWith('TITLE_BASE64:')) {
@@ -501,24 +502,11 @@ async function saveSettingsCandidate(candidate) {
   if (!result.ok) return result;
 
   const next = result.settings;
-  const oldAccelerator = settings.shortcuts.toggle;
-  const newAccelerator = next.shortcuts.toggle;
-  let registeredNew = false;
-
-  if (oldAccelerator !== newAccelerator) {
-    registeredNew = registerToggle(newAccelerator);
-    if (!registeredNew) {
-      return { ok: false, error: 'shortcut-in-use', message: `${newAccelerator} は別のアプリで使用されています。` };
-    }
-  }
-
   try {
     await persistSettings(next);
-    if (registeredNew) globalShortcut.unregister(oldAccelerator);
     settings = next;
     return { ok: true, settings };
   } catch (error) {
-    if (registeredNew) globalShortcut.unregister(newAccelerator);
     return { ok: false, error: 'save-failed', message: `設定を保存できませんでした: ${error.message}` };
   }
 }
@@ -552,27 +540,15 @@ app.on('before-quit', () => {
   clearTimeout(tooltipTimer);
   hookProcess?.kill();
 });
-app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', () => {});
 
 app.whenReady().then(async () => {
   nativeTheme.themeSource = 'system';
   await loadSettings();
-  if (smokeMode) {
-    settings = {
-      ...settings,
-      shortcuts: { ...settings.shortcuts, toggle: 'Control+Alt+Shift+F12' },
-    };
-  }
   createWindow();
   createTooltipWindow();
   createTray();
   await startNativeHook();
-
-  const registered = registerToggle(settings.shortcuts.toggle);
-  if (!registered) {
-    console.warn(`${settings.shortcuts.toggle} を登録できませんでした。`);
-  }
 
   nativeTheme.on('updated', () => {
     const theme = nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
@@ -592,20 +568,13 @@ app.whenReady().then(async () => {
     const smokeHwnd = listResult.windows?.[0]?.hwnd ?? '1001';
     const activateResult = await nativeRequest('ACTIVATE', smokeHwnd);
     const closeResult = await nativeRequest('CLOSE', smokeHwnd);
-    const blockedAccelerator = 'Control+Alt+Shift+F11';
-    const blockerRegistered = globalShortcut.register(blockedAccelerator, () => {});
-    const conflictResult = blockerRegistered
-      ? await saveSettingsCandidate({ ...settings, shortcuts: { ...settings.shortcuts, toggle: blockedAccelerator } })
-      : { ok: false };
     await persistSettings(settings);
     await loadSettings();
     await new Promise((resolve) => setTimeout(resolve, 2_100));
     console.log(JSON.stringify({
       window: Boolean(mainWindow),
       tray: Boolean(tray),
-      shortcut: registered,
-      conflictRollback: !conflictResult.ok && globalShortcut.isRegistered(settings.shortcuts.toggle),
-      settingsReloaded: settings.shortcuts.toggle === 'Control+Alt+Shift+F12',
+      settingsReloaded: settings.shortcuts.activate === 'Enter',
       nativeHookReady: hookReady,
       nativeHookLogic: hookLogicPassed,
       nativeTitleReceived: hookTitleReceived,
@@ -623,7 +592,6 @@ app.whenReady().then(async () => {
       nativeActivate: activateResult.ok,
       nativeClose: closeResult.ok,
     }));
-    if (blockerRegistered) globalShortcut.unregister(blockedAccelerator);
     setTimeout(() => { quitting = true; app.quit(); }, 200);
   } else {
     showOverlay('list');

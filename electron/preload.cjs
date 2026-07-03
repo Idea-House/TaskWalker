@@ -12,6 +12,11 @@ contextBridge.exposeInMainWorld('taskWalker', {
   activateWindow: (hwnd) => ipcRenderer.invoke('windows:activate', hwnd),
   closeWindow: (hwnd) => ipcRenderer.invoke('windows:close', hwnd),
   hideOverlay: () => ipcRenderer.send('window:hide'),
+  onSwitchEvent: (callback) => {
+    const listener = (_event, action) => callback(action);
+    ipcRenderer.on('switch:event', listener);
+    return () => ipcRenderer.removeListener('switch:event', listener);
+  },
   onOpenView: (callback) => {
     const listener = (_event, view) => callback(view);
     ipcRenderer.on('window:open-view', listener);

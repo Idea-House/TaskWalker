@@ -1,7 +1,8 @@
 export type SortMode = 'type' | 'recent' | 'title';
 export type SortDirection = 'asc' | 'desc';
 export type ViewName = 'list' | 'settings';
-export type ShortcutName = 'toggle' | 'activate' | 'close' | 'settings';
+export type ShortcutName = 'activate' | 'close' | 'settings';
+export type SwitchEvent = 'begin-forward' | 'begin-backward' | 'next' | 'previous' | 'commit' | 'cancel';
 export type FallbackIcon = 'excel' | 'chrome' | 'edge' | 'explorer' | 'vscode' | 'terminal';
 
 export interface TaskItem {
@@ -20,7 +21,6 @@ export interface TaskItem {
 }
 
 export interface ShortcutSettings {
-  toggle: string;
   activate: string;
   close: string;
   settings: string;
@@ -34,7 +34,7 @@ export interface AppSettings {
 
 export type SaveSettingsResult =
   | { ok: true; settings: AppSettings }
-  | { ok: false; error: 'duplicate-shortcut' | 'shortcut-in-use' | 'save-failed'; message: string };
+  | { ok: false; error: 'duplicate-shortcut' | 'save-failed'; message: string };
 
 export type NativeWindowError = 'window-not-found' | 'access-denied' | 'activation-failed' | 'native-unavailable' | 'native-timeout' | 'native-restarting' | 'native-restart-failed' | 'native-error';
 export type WindowIconUpdate = { hwnd: string; executablePath: string; iconDataUrl: string };
@@ -51,6 +51,7 @@ declare global {
       activateWindow: (hwnd: string) => Promise<WindowActionResult>;
       closeWindow: (hwnd: string) => Promise<WindowActionResult>;
       hideOverlay: () => void;
+      onSwitchEvent?: (callback: (event: SwitchEvent) => void) => () => void;
       onOpenView: (callback: (view: ViewName) => void) => () => void;
       onThemeChanged: (callback: (theme: 'light' | 'dark') => void) => () => void;
     };

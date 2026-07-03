@@ -5,17 +5,16 @@ import { ShortcutRecorder } from './components/ShortcutRecorder';
 import { initialTasks } from './data/mockTasks';
 import { matchesShortcut, validateShortcutSet } from './lib/shortcut-utils';
 import { filterTasks, sortTasks } from './lib/task-utils';
-import type { AppSettings, NativeWindowError, ShortcutName, SortDirection, SortMode, TaskItem, ViewName } from './types';
+import type { AppSettings, NativeWindowError, ShortcutName, SortDirection, SortMode, SwitchEvent, TaskItem, ViewName } from './types';
 import './styles.css';
 
 export const defaultSettings: AppSettings = {
   sortMode: 'type', sortDirections: { type: 'asc', recent: 'desc', title: 'asc' },
-  shortcuts: { toggle: 'Alt+W', activate: 'Enter', close: 'Control+Enter', settings: 'Control+,' },
+  shortcuts: { activate: 'Enter', close: 'Control+Enter', settings: 'Control+,' },
 };
 
 const sortLabels: Record<SortMode, string> = { type: 'アプリ種別', recent: '最近使用', title: 'ウィンドウ名' };
 const shortcutLabels: Array<{ key: ShortcutName; label: string; description: string }> = [
-  { key: 'toggle', label: 'Task Walkerを表示', description: 'ほかのアプリを使用中でも呼び出します' },
   { key: 'activate', label: '選択したタスクへ切り替え', description: '選択中のウィンドウを開きます' },
   { key: 'close', label: '選択したタスクを閉じる', description: '対象ウィンドウへ終了を要求します' },
   { key: 'settings', label: '設定を表示', description: 'この設定画面を開きます' },
@@ -47,6 +46,7 @@ export default function App() {
   const [listError, setListError] = useState<string | null>(null);
   const [draft, setDraft] = useState(defaultSettings);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [switchSession, setSwitchSession] = useState({ active: false, offset: 0, commit: false });
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const forced = new URLSearchParams(window.location.search).get('theme');
     if (forced === 'light' || forced === 'dark') return forced;
@@ -56,8 +56,12 @@ export default function App() {
   const shouldSelectActiveRef = useRef(true);
   const refreshInFlightRef = useRef(false);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
+  const switchCommittedRef = useRef(false);
 
-  const visibleTasks = useMemo(() => sortTasks(filterTasks(tasks, query), settings.sortMode, settings.sortDirections[settings.sortMode]), [tasks, query, settings.sortMode, settings.sortDirections]);
+  const visibleTasks = useMemo(() => switchSession.active
+    ? sortTasks(tasks, 'recent', 'desc')
+    : sortTasks(filterTasks(tasks, query), settings.sortMode, settings.sortDirections[settings.sortMode]),
+  [tasks, query, settings.sortMode, settings.sortDirections, switchSession.active]);
   const selectedTask = visibleTasks.find((task) => task.id === selectedId) ?? visibleTasks[0];
 
   const refreshTasks = useCallback(async () => {
@@ -110,6 +114,31 @@ export default function App() {
     openView(next);
     if (next === 'list') void refreshTasks();
   }), [openView, refreshTasks]);
+  useEffect(() => window.taskWalker?.onSwitchEvent?.((event: SwitchEvent) => {
+    if (event === 'begin-forward' || event === 'begin-backward') {
+      shouldSelectActiveRef.current = false;
+      switchCommittedRef.current = false;
+      setQuery('');
+      setLoading(true);
+      openView('list');
+      setSwitchSession({ active: true, offset: event === 'begin-forward' ? 1 : -1, commit: false });
+      void refreshTasks();
+      return;
+    }
+    if (event === 'next' || event === 'previous') {
+      setSwitchSession((current) => current.active
+        ? { ...current, offset: current.offset + (event === 'next' ? 1 : -1) }
+        : current);
+      return;
+    }
+    if (event === 'commit') {
+      setSwitchSession((current) => current.active ? { ...current, commit: true } : current);
+      return;
+    }
+    switchCommittedRef.current = false;
+    setSwitchSession({ active: false, offset: 0, commit: false });
+    window.taskWalker?.hideOverlay();
+  }), [openView, refreshTasks]);
   useEffect(() => {
     if (!nativeMode || view !== 'list') return;
     let timer: number | undefined;
@@ -129,6 +158,28 @@ export default function App() {
     const row = rowRefs.current.get(selectedId);
     if (typeof row?.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
   }, [selectedId]);
+  useEffect(() => {
+    if (!switchSession.active) return;
+    const hasSwitchTarget = visibleTasks.some((task) => !task.isActive);
+    if ((!visibleTasks.length || !hasSwitchTarget) && switchSession.commit && !loading) {
+      setSwitchSession({ active: false, offset: 0, commit: false });
+      window.taskWalker?.hideOverlay();
+      return;
+    }
+    if (!visibleTasks.length || !hasSwitchTarget) return;
+    const activeIndex = visibleTasks.findIndex((task) => task.isActive);
+    const start = activeIndex >= 0 ? activeIndex : 0;
+    const index = ((start + switchSession.offset) % visibleTasks.length + visibleTasks.length) % visibleTasks.length;
+    const candidate = visibleTasks[index];
+    setSelectedId(candidate.id);
+    if (!switchSession.commit || switchCommittedRef.current) return;
+    switchCommittedRef.current = true;
+    setSwitchSession({ active: false, offset: 0, commit: false });
+    void window.taskWalker?.activateWindow(candidate.hwnd).then((result) => {
+      if (result.ok) window.taskWalker?.hideOverlay();
+      else { switchCommittedRef.current = false; setToast(errorText(result.error)); }
+    });
+  }, [loading, switchSession, visibleTasks]);
 
   async function activateTask(task: TaskItem) {
     if (!window.taskWalker?.activateWindow) {

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App, { defaultSettings } from './App';
 import { initialTasks } from './data/mockTasks';
@@ -87,6 +87,29 @@ describe('Task Walker UI', () => {
     expect(container.querySelector('.native-app-icon')).not.toBeInTheDocument();
     deliverIcon?.({ hwnd: task.hwnd, executablePath: task.executablePath, iconDataUrl: 'data:image/png;base64,dGVzdA==' });
     await waitFor(() => expect(container.querySelector('.native-app-icon')).toBeInTheDocument());
+  });
+
+  it('cycles recently used windows with Alt+W and commits on Alt release', async () => {
+    let deliverSwitch: ((event: 'begin-forward' | 'next' | 'commit') => void) | undefined;
+    const active = { ...initialTasks[0], id: 'active', hwnd: 'a', isActive: true, lastActive: 300 };
+    const previous = { ...initialTasks[1], id: 'previous', hwnd: 'b', isActive: false, lastActive: 200 };
+    const older = { ...initialTasks[2], id: 'older', hwnd: 'c', isActive: false, lastActive: 100 };
+    const activateWindow = vi.fn().mockResolvedValue({ ok: true });
+    window.taskWalker = {
+      getSettings: vi.fn().mockResolvedValue(defaultSettings), saveSettings: vi.fn().mockResolvedValue({ ok: true, settings: defaultSettings }),
+      listWindows: vi.fn().mockResolvedValue({ ok: true, windows: [older, active, previous] }), activateWindow, closeWindow: vi.fn(),
+      hideOverlay: vi.fn(), onOpenView: vi.fn().mockReturnValue(() => {}), onThemeChanged: vi.fn().mockReturnValue(() => {}),
+      onSwitchEvent: vi.fn((callback) => { deliverSwitch = callback; return () => {}; }),
+    };
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
+    act(() => deliverSwitch?.('begin-forward'));
+    await waitFor(() => expect(screen.getByRole('option', { name: new RegExp(previous.title) })).toHaveAttribute('aria-selected', 'true'));
+    act(() => deliverSwitch?.('next'));
+    await waitFor(() => expect(screen.getByRole('option', { name: new RegExp(older.title) })).toHaveAttribute('aria-selected', 'true'));
+    act(() => deliverSwitch?.('commit'));
+    await waitFor(() => expect(activateWindow).toHaveBeenCalledWith(older.hwnd));
+    expect(window.taskWalker.hideOverlay).toHaveBeenCalled();
   });
 
   it('opens settings and toggles sort direction', () => {

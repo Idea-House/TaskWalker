@@ -55,6 +55,8 @@ internal static class Program
     private static bool shiftDown;
     private static bool windowsDown;
     private static bool copyShortcutDown;
+    private static bool taskSwitchActive;
+    private static bool taskSwitchCancelled;
     private static long lastAltTapTicks;
 
     [STAThread]
@@ -629,6 +631,8 @@ internal static class Program
                 int key = unchecked((int)input.vkCode);
                 bool isAlt = key == 0x12 || key == 0xA4 || key == 0xA5;
                 bool isCopyKey = key == 0x43;
+                bool isSwitchKey = key == 0x57;
+                bool isEscape = key == 0x1B;
                 UpdateModifierState(key, down, up);
                 if (down)
                 {
@@ -636,6 +640,25 @@ internal static class Program
                     else if (altDown && !isAlt)
                     {
                         modifiedDuringAlt = true;
+                        if (isSwitchKey && !controlDown && !windowsDown)
+                        {
+                            if (taskSwitchCancelled) return new IntPtr(1);
+                            if (!taskSwitchActive)
+                            {
+                                taskSwitchActive = true;
+                                taskSwitchCancelled = false;
+                                EmitLine(shiftDown ? "SWITCH:BEGIN_BACKWARD" : "SWITCH:BEGIN_FORWARD");
+                            }
+                            else EmitLine(shiftDown ? "SWITCH:PREVIOUS" : "SWITCH:NEXT");
+                            return new IntPtr(1);
+                        }
+                        if (isEscape && taskSwitchActive)
+                        {
+                            taskSwitchActive = false;
+                            taskSwitchCancelled = true;
+                            EmitLine("SWITCH:CANCEL");
+                            return new IntPtr(1);
+                        }
                         if (isCopyKey && !controlDown && !windowsDown)
                         {
                             if (!copyShortcutDown)
@@ -649,6 +672,12 @@ internal static class Program
                         }
                     }
                 }
+                else if (up && isSwitchKey && (taskSwitchActive || taskSwitchCancelled)) return new IntPtr(1);
+                else if (up && isEscape && taskSwitchCancelled)
+                {
+                    taskSwitchCancelled = false;
+                    return new IntPtr(1);
+                }
                 else if (up && isCopyKey && copyShortcutDown)
                 {
                     copyShortcutDown = false;
@@ -656,6 +685,12 @@ internal static class Program
                 }
                 else if (up && isAlt && altDown)
                 {
+                    if (taskSwitchActive)
+                    {
+                        taskSwitchActive = false;
+                        EmitLine("SWITCH:COMMIT");
+                    }
+                    taskSwitchCancelled = false;
                     if (!modifiedDuringAlt) RegisterAltTap();
                     altDown = false; modifiedDuringAlt = false;
                 }

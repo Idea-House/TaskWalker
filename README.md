@@ -1,12 +1,12 @@
-# Task Walker 1.1.0
+# Task Walker 1.2.0
 
 PowerToys Window Walkerを参考にした、Windows 11 x64向けの実ウィンドウ切替アプリです。開いているトップレベルウィンドウを検索・並び替え・前面化・終了できます。
 
 ## 起動
 
-配布版は `release/Task-Walker-1.1.0-portable.exe` をダブルクリックします。一般ユーザー権限で起動するため、通常はUAC確認なしで利用できます。インストールは不要です。
+配布版は `release/Task-Walker-1.2.0-portable.exe` をダブルクリックします。一般ユーザー権限で起動するため、通常はUAC確認なしで利用できます。インストールは不要です。
 
-- `Alt+W`: Task Walkerの表示／非表示
+- `Alt+W`: Altを押したままWで最近使ったウィンドウを巡回し、Altを離して切り替え（`Shift+Alt+W`で逆巡回、`Esc`で取消）
 - `Enter`: 選択したウィンドウへ切り替え
 - `Ctrl+Enter`: 選択したウィンドウへ終了要求（未保存確認は対象アプリが表示）
 - `Ctrl+,`: 設定を表示
@@ -38,5 +38,5 @@ npm.cmd run dist
 
 ## 配布物
 
-- `release/Task-Walker-1.1.0-portable.exe`
-- SHA-256: `5FB45A73854E12397E19D36901A30570267AC94B05322FEFC18FBBF3166EE132`
+- `release/Task-Walker-1.2.0-portable.exe`
+- SHA-256: `5F3560B76AC947A46333AA89B5CD556F2EE9943FBA8D74D7264A9705AF563130`
