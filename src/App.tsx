@@ -53,6 +53,7 @@ export default function App() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   });
   const inputRef = useRef<HTMLInputElement>(null);
+  const shouldFocusSearchRef = useRef(true);
   const shouldSelectActiveRef = useRef(true);
   const shouldRevealSelectionRef = useRef(true);
   const refreshInFlightRef = useRef(false);
@@ -97,7 +98,9 @@ export default function App() {
 
   const openView = useCallback((nextView: ViewName) => {
     setView(nextView); setSortOpen(false); setSaveError(null);
-    if (nextView === 'list') requestAnimationFrame(() => inputRef.current?.focus());
+    if (nextView === 'list') requestAnimationFrame(() => {
+      if (shouldFocusSearchRef.current) inputRef.current?.focus();
+    });
     else setDraft(settings);
   }, [settings]);
 
@@ -117,18 +120,23 @@ export default function App() {
     )));
   }), []);
   useEffect(() => window.taskWalker?.onOpenView((next) => {
-    if (next === 'list') shouldSelectActiveRef.current = true;
+    if (next === 'list') {
+      shouldFocusSearchRef.current = true;
+      shouldSelectActiveRef.current = true;
+    }
     openView(next);
     if (next === 'list') void refreshTasks();
   }), [openView, refreshTasks]);
   useEffect(() => window.taskWalker?.onSwitchEvent?.((event: SwitchEvent) => {
     if (event === 'begin-forward' || event === 'begin-backward') {
+      shouldFocusSearchRef.current = false;
       shouldSelectActiveRef.current = false;
       switchCommittedRef.current = false;
       setQuery('');
       setLoading(true);
       openView('list');
       setSwitchSession({ active: true, offset: event === 'begin-forward' ? 1 : -1, commit: false });
+      requestAnimationFrame(() => taskListRef.current?.focus());
       void refreshTasks();
       return;
     }
@@ -156,7 +164,9 @@ export default function App() {
     updatePolling(); document.addEventListener('visibilitychange', updatePolling);
     return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', updatePolling); };
   }, [nativeMode, refreshTasks, view]);
-  useEffect(() => { if (view === 'list') requestAnimationFrame(() => inputRef.current?.focus()); }, [view]);
+  useEffect(() => { if (view === 'list') requestAnimationFrame(() => {
+    if (shouldFocusSearchRef.current) inputRef.current?.focus();
+  }); }, [view]);
   useEffect(() => {
     if (visibleTasks.length && !visibleTasks.some((task) => task.id === selectedId)) {
       shouldRevealSelectionRef.current = false;
@@ -265,7 +275,19 @@ export default function App() {
       <header className="search-header">
         <button className="icon-button back-button" aria-label="閉じる" onClick={() => window.taskWalker?.hideOverlay()}><ArrowLeft20Regular /></button>
         <Window20Regular className="window-glyph" aria-hidden="true" /><Search20Regular className="search-glyph" aria-hidden="true" />
-        <input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="開いているウィンドウを検索してください…" aria-label="開いているウィンドウを検索" spellCheck={false} />
+        <input
+          ref={inputRef}
+          value={query}
+          onFocus={() => {
+            shouldFocusSearchRef.current = true;
+            switchCommittedRef.current = false;
+            setSwitchSession((current) => current.active ? { active: false, offset: 0, commit: false } : current);
+          }}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="開いているウィンドウを検索してください…"
+          aria-label="開いているウィンドウを検索"
+          spellCheck={false}
+        />
         {query && <button className="icon-button clear-button" aria-label="検索を消去" onClick={() => setQuery('')}><Dismiss16Regular /></button>}
         <div className="sort-control">
           <button className="sort-button sort-mode-button" onClick={() => setSortOpen((open) => !open)} aria-haspopup="menu" aria-expanded={sortOpen}><ArrowSort20Regular /><span>{sortLabels[settings.sortMode]}</span></button>
@@ -273,7 +295,7 @@ export default function App() {
           {sortOpen && <div className="sort-menu" role="menu">{(Object.keys(sortLabels) as SortMode[]).map((mode) => <button key={mode} role="menuitemradio" aria-checked={settings.sortMode === mode} onClick={() => changeSort(mode)}><span>{sortLabels[mode]}</span><span className="sort-menu-state">{settings.sortDirections[mode] === 'asc' ? <ArrowSortUp20Regular /> : <ArrowSortDown20Regular />}{settings.sortMode === mode && <Checkmark16Regular />}</span></button>)}</div>}
         </div>
       </header>
-      <section ref={taskListRef} className="task-list" role="listbox" aria-label="開いているタスク">
+      <section ref={taskListRef} className="task-list" role="listbox" aria-label="開いているタスク" tabIndex={-1}>
         {visibleTasks.length ? visibleTasks.map((task) => <div
           role="option"
           aria-selected={task.id === selectedTask?.id}

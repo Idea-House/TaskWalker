@@ -193,6 +193,36 @@ describe('Task Walker UI', () => {
     expect(activateWindow).toHaveBeenCalledWith(previous.hwnd);
   });
 
+  it('keeps the list open when search is focused during an Alt+W session', async () => {
+    let deliverSwitch: ((event: 'begin-forward' | 'commit') => void) | undefined;
+    const active = { ...initialTasks[0], id: 'active', hwnd: 'a', isActive: true, lastActive: 300 };
+    const previous = { ...initialTasks[1], id: 'previous', hwnd: 'b', isActive: false, lastActive: 200 };
+    const activateWindow = vi.fn().mockResolvedValue({ ok: true });
+    const hideOverlay = vi.fn();
+    window.taskWalker = {
+      getSettings: vi.fn().mockResolvedValue(defaultSettings), saveSettings: vi.fn().mockResolvedValue({ ok: true, settings: defaultSettings }),
+      listWindows: vi.fn().mockResolvedValue({ ok: true, windows: [active, previous] }), activateWindow, closeWindow: vi.fn(),
+      hideOverlay, onOpenView: vi.fn().mockReturnValue(() => {}), onThemeChanged: vi.fn().mockReturnValue(() => {}),
+      onSwitchEvent: vi.fn((callback) => { deliverSwitch = callback; return () => {}; }),
+    };
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(2));
+    act(() => deliverSwitch?.('begin-forward'));
+    const list = screen.getByRole('listbox');
+    const search = screen.getByRole('textbox', { name: '開いているウィンドウを検索' });
+    await waitFor(() => expect(list).toHaveFocus());
+    expect(search).not.toHaveFocus();
+    act(() => search.focus());
+    act(() => deliverSwitch?.('commit'));
+    expect(activateWindow).not.toHaveBeenCalled();
+    expect(hideOverlay).not.toHaveBeenCalled();
+    fireEvent.change(search, { target: { value: previous.title } });
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('option'));
+    await waitFor(() => expect(activateWindow).toHaveBeenCalledTimes(1));
+    expect(activateWindow).toHaveBeenCalledWith(previous.hwnd);
+  });
+
   it('opens settings and toggles sort direction', () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'アプリ種別を降順に変更' }));
