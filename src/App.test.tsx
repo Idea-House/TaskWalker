@@ -155,6 +155,10 @@ describe('Task Walker UI', () => {
     fireEvent.mouseEnter(olderRow);
     expect(previousRow).toHaveClass('selected', 'switch-target');
     expect(olderRow).not.toHaveClass('selected', 'switch-target');
+    fireEvent.keyDown(window, { key: 'ArrowDown', altKey: true });
+    await waitFor(() => expect(olderRow).toHaveClass('selected', 'switch-target'));
+    fireEvent.keyDown(window, { key: 'ArrowUp', altKey: true });
+    await waitFor(() => expect(previousRow).toHaveClass('selected', 'switch-target'));
     act(() => deliverSwitch?.('next'));
     await waitFor(() => expect(olderRow).toHaveClass('selected', 'switch-target'));
     expect(previousRow).not.toHaveClass('switch-target');

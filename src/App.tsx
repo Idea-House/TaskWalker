@@ -228,8 +228,12 @@ export default function App() {
       if (view !== 'list') return;
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault(); if (!visibleTasks.length) return;
-        const current = Math.max(0, visibleTasks.findIndex((task) => task.id === selectedTask?.id));
         const delta = event.key === 'ArrowDown' ? 1 : -1;
+        if (switchSession.active && event.altKey) {
+          setSwitchSession((current) => current.active ? { ...current, offset: current.offset + delta } : current);
+          return;
+        }
+        const current = Math.max(0, visibleTasks.findIndex((task) => task.id === selectedTask?.id));
         shouldRevealSelectionRef.current = true;
         setSelectedId(visibleTasks[(current + delta + visibleTasks.length) % visibleTasks.length].id); return;
       }
@@ -238,7 +242,7 @@ export default function App() {
       else if (matchesShortcut(event, settings.shortcuts.activate)) { event.preventDefault(); if (selectedTask) void activateTask(selectedTask); }
     }
     window.addEventListener('keydown', handleKeyboard); return () => window.removeEventListener('keydown', handleKeyboard);
-  }, [openView, selectedTask, settings, view, visibleTasks]);
+  }, [openView, selectedTask, settings, switchSession.active, view, visibleTasks]);
 
   function changeSort(sortMode: SortMode) { const next = { ...settings, sortMode }; setSettings(next); setDraft(next); setSortOpen(false); void window.taskWalker?.saveSettings(next); }
   function toggleSortDirection() {
