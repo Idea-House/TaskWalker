@@ -189,6 +189,8 @@ button { color: inherit; }
 }
 .task-row:hover { background: var(--surface-hover); }
 .task-row.selected { background: var(--surface-selected); }
+.task-row.switch-target { background: transparent; outline: 2px solid var(--accent); outline-offset: -2px; }
+.task-row.switch-target:hover { background: var(--surface-hover); }
 .task-row.active-window::before {
   content: '';
   position: absolute;

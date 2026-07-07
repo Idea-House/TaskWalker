@@ -46,6 +46,7 @@ describe('Task Walker UI', () => {
     const otherRow = screen.getByRole('option', { name: new RegExp(other.title) });
     fireEvent.mouseEnter(otherRow);
     expect(otherRow).toHaveAttribute('aria-selected', 'true');
+    expect(otherRow).not.toHaveClass('switch-target');
     expect(activeRow).toHaveAttribute('aria-selected', 'false');
     expect(activeRow).toHaveClass('active-window');
   });
@@ -89,6 +90,49 @@ describe('Task Walker UI', () => {
     await waitFor(() => expect(container.querySelector('.native-app-icon')).toBeInTheDocument());
   });
 
+  it('preserves the list scroll position when the native window list refreshes', async () => {
+    vi.useFakeTimers();
+    const first = { ...initialTasks[0], isActive: true };
+    const second = { ...initialTasks[1], isActive: false };
+    const listWindows = vi.fn()
+      .mockResolvedValueOnce({ ok: true, windows: [first, second] })
+      .mockResolvedValue({ ok: true, windows: [{ ...first, title: `${first.title} updated` }, second] });
+    window.taskWalker = {
+      getSettings: vi.fn().mockResolvedValue(defaultSettings), saveSettings: vi.fn().mockResolvedValue({ ok: true, settings: defaultSettings }),
+      listWindows, activateWindow: vi.fn(), closeWindow: vi.fn(), hideOverlay: vi.fn(),
+      onOpenView: vi.fn().mockReturnValue(() => {}), onThemeChanged: vi.fn().mockReturnValue(() => {}),
+    };
+    const { container } = render(<App />);
+    await act(async () => { await Promise.resolve(); });
+    const list = container.querySelector('.task-list') as HTMLElement;
+    list.scrollTop = 180;
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(listWindows).toHaveBeenCalledTimes(2);
+    expect(list.scrollTop).toBe(180);
+  });
+
+  it('does not scroll to the replacement selection when the selected window disappears', async () => {
+    vi.useFakeTimers();
+    const first = { ...initialTasks[0], isActive: true };
+    const second = { ...initialTasks[1], isActive: false };
+    const listWindows = vi.fn()
+      .mockResolvedValueOnce({ ok: true, windows: [first, second] })
+      .mockResolvedValue({ ok: true, windows: [second] });
+    window.taskWalker = {
+      getSettings: vi.fn().mockResolvedValue(defaultSettings), saveSettings: vi.fn().mockResolvedValue({ ok: true, settings: defaultSettings }),
+      listWindows, activateWindow: vi.fn(), closeWindow: vi.fn(), hideOverlay: vi.fn(),
+      onOpenView: vi.fn().mockReturnValue(() => {}), onThemeChanged: vi.fn().mockReturnValue(() => {}),
+    };
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView });
+    render(<App />);
+    await act(async () => { await Promise.resolve(); });
+    scrollIntoView.mockClear();
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(screen.getByRole('option')).toHaveAttribute('aria-selected', 'true');
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
   it('cycles recently used windows with Alt+W and commits on Alt release', async () => {
     let deliverSwitch: ((event: 'begin-forward' | 'next' | 'commit') => void) | undefined;
     const active = { ...initialTasks[0], id: 'active', hwnd: 'a', isActive: true, lastActive: 300 };
@@ -104,12 +148,45 @@ describe('Task Walker UI', () => {
     render(<App />);
     await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
     act(() => deliverSwitch?.('begin-forward'));
-    await waitFor(() => expect(screen.getByRole('option', { name: new RegExp(previous.title) })).toHaveAttribute('aria-selected', 'true'));
+    const previousRow = screen.getByRole('option', { name: new RegExp(previous.title) });
+    const olderRow = screen.getByRole('option', { name: new RegExp(older.title) });
+    await waitFor(() => expect(previousRow).toHaveClass('selected', 'switch-target'));
+    expect(screen.getByRole('option', { name: new RegExp(active.title) })).not.toHaveClass('switch-target');
+    fireEvent.mouseEnter(olderRow);
+    expect(previousRow).toHaveClass('selected', 'switch-target');
+    expect(olderRow).not.toHaveClass('selected', 'switch-target');
     act(() => deliverSwitch?.('next'));
-    await waitFor(() => expect(screen.getByRole('option', { name: new RegExp(older.title) })).toHaveAttribute('aria-selected', 'true'));
+    await waitFor(() => expect(olderRow).toHaveClass('selected', 'switch-target'));
+    expect(previousRow).not.toHaveClass('switch-target');
     act(() => deliverSwitch?.('commit'));
     await waitFor(() => expect(activateWindow).toHaveBeenCalledWith(older.hwnd));
+    await waitFor(() => expect(olderRow).not.toHaveClass('switch-target'));
     expect(window.taskWalker.hideOverlay).toHaveBeenCalled();
+  });
+
+  it('commits an Alt+W target after selection catches up when Alt is released immediately', async () => {
+    let deliverSwitch: ((event: 'begin-forward' | 'commit') => void) | undefined;
+    let resolveWindows: ((result: { ok: true; windows: typeof initialTasks }) => void) | undefined;
+    const active = { ...initialTasks[0], id: 'active', hwnd: 'a', isActive: true, lastActive: 300 };
+    const previous = { ...initialTasks[1], id: 'previous', hwnd: 'b', isActive: false, lastActive: 200 };
+    const windowsPromise = new Promise<{ ok: true; windows: typeof initialTasks }>((resolve) => { resolveWindows = resolve; });
+    const activateWindow = vi.fn().mockResolvedValue({ ok: true });
+    window.taskWalker = {
+      getSettings: vi.fn().mockResolvedValue(defaultSettings), saveSettings: vi.fn().mockResolvedValue({ ok: true, settings: defaultSettings }),
+      listWindows: vi.fn().mockReturnValue(windowsPromise), activateWindow, closeWindow: vi.fn(),
+      hideOverlay: vi.fn(), onOpenView: vi.fn().mockReturnValue(() => {}), onThemeChanged: vi.fn().mockReturnValue(() => {}),
+      onSwitchEvent: vi.fn((callback) => { deliverSwitch = callback; return () => {}; }),
+    };
+    render(<App />);
+    act(() => {
+      deliverSwitch?.('begin-forward');
+      deliverSwitch?.('commit');
+    });
+    expect(activateWindow).not.toHaveBeenCalled();
+    await act(async () => { resolveWindows?.({ ok: true, windows: [active, previous] }); await windowsPromise; });
+    await waitFor(() => expect(screen.getByRole('option', { name: new RegExp(previous.title) })).toHaveClass('selected'));
+    await waitFor(() => expect(activateWindow).toHaveBeenCalledTimes(1));
+    expect(activateWindow).toHaveBeenCalledWith(previous.hwnd);
   });
 
   it('opens settings and toggles sort direction', () => {

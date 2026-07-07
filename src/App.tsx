@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft20Regular, ArrowSortDown20Regular, ArrowSort20Regular, ArrowSortUp20Regular, Checkmark16Regular, Dismiss16Regular, Search20Regular, Settings20Regular, Window20Regular } from '@fluentui/react-icons';
 import { AppIcon } from './components/AppIcon';
 import { ShortcutRecorder } from './components/ShortcutRecorder';
@@ -54,7 +54,10 @@ export default function App() {
   });
   const inputRef = useRef<HTMLInputElement>(null);
   const shouldSelectActiveRef = useRef(true);
+  const shouldRevealSelectionRef = useRef(true);
   const refreshInFlightRef = useRef(false);
+  const taskListRef = useRef<HTMLElement>(null);
+  const pendingScrollTopRef = useRef<number | null>(null);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const switchCommittedRef = useRef(false);
 
@@ -71,6 +74,7 @@ export default function App() {
       const result = await window.taskWalker.listWindows();
       setLoading(false);
       if (result.ok) {
+        pendingScrollTopRef.current = taskListRef.current?.scrollTop ?? null;
         setTasks((current) => result.windows.map((task) => ({
           ...task,
           iconDataUrl: task.iconDataUrl ?? current.find((item) => item.hwnd === task.hwnd && item.executablePath === task.executablePath)?.iconDataUrl,
@@ -78,7 +82,10 @@ export default function App() {
         setListError(null);
         if (shouldSelectActiveRef.current) {
           const active = result.windows.find((task) => task.isActive);
-          if (active) setSelectedId(active.id);
+          if (active) {
+            shouldRevealSelectionRef.current = true;
+            setSelectedId(active.id);
+          }
           shouldSelectActiveRef.current = false;
         }
       }
@@ -151,10 +158,23 @@ export default function App() {
   }, [nativeMode, refreshTasks, view]);
   useEffect(() => { if (view === 'list') requestAnimationFrame(() => inputRef.current?.focus()); }, [view]);
   useEffect(() => {
-    if (visibleTasks.length && !visibleTasks.some((task) => task.id === selectedId)) setSelectedId(visibleTasks[0].id);
-    if (!visibleTasks.length && selectedId) setSelectedId('');
+    if (visibleTasks.length && !visibleTasks.some((task) => task.id === selectedId)) {
+      shouldRevealSelectionRef.current = false;
+      setSelectedId(visibleTasks[0].id);
+    }
+    if (!visibleTasks.length && selectedId) {
+      shouldRevealSelectionRef.current = false;
+      setSelectedId('');
+    }
   }, [visibleTasks, selectedId]);
+  useLayoutEffect(() => {
+    if (pendingScrollTopRef.current === null || !taskListRef.current) return;
+    taskListRef.current.scrollTop = pendingScrollTopRef.current;
+    pendingScrollTopRef.current = null;
+  }, [tasks]);
   useEffect(() => {
+    if (!shouldRevealSelectionRef.current) return;
+    shouldRevealSelectionRef.current = false;
     const row = rowRefs.current.get(selectedId);
     if (typeof row?.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
   }, [selectedId]);
@@ -171,15 +191,19 @@ export default function App() {
     const start = activeIndex >= 0 ? activeIndex : 0;
     const index = ((start + switchSession.offset) % visibleTasks.length + visibleTasks.length) % visibleTasks.length;
     const candidate = visibleTasks[index];
-    setSelectedId(candidate.id);
-    if (!switchSession.commit || switchCommittedRef.current) return;
+    if (selectedId !== candidate.id) {
+      shouldRevealSelectionRef.current = true;
+      setSelectedId(candidate.id);
+      return;
+    }
+    if (!switchSession.commit || loading || switchCommittedRef.current) return;
     switchCommittedRef.current = true;
     setSwitchSession({ active: false, offset: 0, commit: false });
     void window.taskWalker?.activateWindow(candidate.hwnd).then((result) => {
       if (result.ok) window.taskWalker?.hideOverlay();
       else { switchCommittedRef.current = false; setToast(errorText(result.error)); }
     });
-  }, [loading, switchSession, visibleTasks]);
+  }, [loading, selectedId, switchSession, visibleTasks]);
 
   async function activateTask(task: TaskItem) {
     if (!window.taskWalker?.activateWindow) {
@@ -206,6 +230,7 @@ export default function App() {
         event.preventDefault(); if (!visibleTasks.length) return;
         const current = Math.max(0, visibleTasks.findIndex((task) => task.id === selectedTask?.id));
         const delta = event.key === 'ArrowDown' ? 1 : -1;
+        shouldRevealSelectionRef.current = true;
         setSelectedId(visibleTasks[(current + delta + visibleTasks.length) % visibleTasks.length].id); return;
       }
       if (matchesShortcut(event, settings.shortcuts.close)) { event.preventDefault(); if (selectedTask) void closeTask(selectedTask); }
@@ -244,15 +269,19 @@ export default function App() {
           {sortOpen && <div className="sort-menu" role="menu">{(Object.keys(sortLabels) as SortMode[]).map((mode) => <button key={mode} role="menuitemradio" aria-checked={settings.sortMode === mode} onClick={() => changeSort(mode)}><span>{sortLabels[mode]}</span><span className="sort-menu-state">{settings.sortDirections[mode] === 'asc' ? <ArrowSortUp20Regular /> : <ArrowSortDown20Regular />}{settings.sortMode === mode && <Checkmark16Regular />}</span></button>)}</div>}
         </div>
       </header>
-      <section className="task-list" role="listbox" aria-label="開いているタスク">
+      <section ref={taskListRef} className="task-list" role="listbox" aria-label="開いているタスク">
         {visibleTasks.length ? visibleTasks.map((task) => <div
           role="option"
           aria-selected={task.id === selectedTask?.id}
           aria-label={`${task.title}、実行中: ${task.processName}${task.isActive ? '、現在表示中' : ''}`}
           key={task.id}
           ref={(element) => { if (element) rowRefs.current.set(task.id, element); else rowRefs.current.delete(task.id); }}
-          className={`task-row ${task.id === selectedTask?.id ? 'selected' : ''} ${task.isActive ? 'active-window' : ''}`}
-          onMouseEnter={() => setSelectedId(task.id)}
+          className={`task-row ${task.id === selectedTask?.id ? 'selected' : ''} ${switchSession.active && task.id === selectedTask?.id ? 'switch-target' : ''} ${task.isActive ? 'active-window' : ''}`}
+          onMouseEnter={() => {
+            if (switchSession.active) return;
+            shouldRevealSelectionRef.current = false;
+            setSelectedId(task.id);
+          }}
           onClick={() => void activateTask(task)}
         >
           <AppIcon task={task} /><span className="task-title">{task.title}</span><span className="process-name">実行中: {task.processName}</span>
