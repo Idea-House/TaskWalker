@@ -130,6 +130,7 @@ function showOverlay(view = 'list') {
   positionWindow();
   mainWindow.show();
   mainWindow.focus();
+  mainWindow.webContents.focus();
   mainWindow.webContents.send('window:open-view', view);
 }
 

@@ -104,6 +104,14 @@ export default function App() {
     else setDraft(settings);
   }, [settings]);
 
+  const focusTaskListForSwitch = useCallback(() => {
+    const focusList = () => taskListRef.current?.focus();
+    focusList();
+    requestAnimationFrame(focusList);
+    window.setTimeout(focusList, 25);
+    window.setTimeout(focusList, 75);
+  }, []);
+
   useEffect(() => { window.taskWalker?.getSettings().then((stored) => { setSettings(stored); setDraft(stored); }); }, []);
   useEffect(() => {
     const dispose = window.taskWalker?.onThemeChanged(setTheme);
@@ -136,7 +144,7 @@ export default function App() {
       setLoading(true);
       openView('list');
       setSwitchSession({ active: true, offset: event === 'begin-forward' ? 1 : -1, commit: false });
-      requestAnimationFrame(() => taskListRef.current?.focus());
+      focusTaskListForSwitch();
       void refreshTasks();
       return;
     }
@@ -153,7 +161,7 @@ export default function App() {
     switchCommittedRef.current = false;
     setSwitchSession({ active: false, offset: 0, commit: false });
     window.taskWalker?.hideOverlay();
-  }), [openView, refreshTasks]);
+  }), [focusTaskListForSwitch, openView, refreshTasks]);
   useEffect(() => {
     if (!nativeMode || view !== 'list') return;
     let timer: number | undefined;
@@ -239,7 +247,7 @@ export default function App() {
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault(); if (!visibleTasks.length) return;
         const delta = event.key === 'ArrowDown' ? 1 : -1;
-        if (switchSession.active && event.altKey) {
+        if (switchSession.active) {
           setSwitchSession((current) => current.active ? { ...current, offset: current.offset + delta } : current);
           return;
         }
